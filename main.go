@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/shrymhty/chirpy/internal/auth"
 	"github.com/shrymhty/chirpy/internal/database"
 )
 
@@ -21,6 +22,21 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	db *database.Queries
 	env string
+}
+
+type chirpResp struct {
+	ID uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body string `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+type userResponse struct {
+	ID uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email string `json:"email"`
 }
 
 func main() {
@@ -50,8 +66,11 @@ func main() {
 
 	// serve api endpoints
 	mux.HandleFunc("GET /api/healthz", checkReadiness)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirps)
 	mux.HandleFunc("POST /api/users", apiCgf.createUser)
+	mux.HandleFunc("POST /api/chirps", apiCgf.chirpHandler)
+	mux.HandleFunc("POST /api/login", apiCgf.userLogin)
+	mux.HandleFunc("GET /api/chirps", apiCgf.getChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpid}", apiCgf.getChirpById)
 
 	mux.HandleFunc("GET /admin/metrics", apiCgf.handleMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCgf.resetMetrics)
@@ -113,29 +132,6 @@ func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits reset to 0"))
 }
 
-
-func validateChirps(w http.ResponseWriter, r *http.Request) {
-	type returnVals struct {
-		Body string `json:"body"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	var vals returnVals
-	err := decoder.Decode(&vals)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-		return
-	} 
-
-	if len(vals.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-		return
-	}
-
-	cleanedBody := cleanBody(vals.Body)
-	respondWithJSON(w, http.StatusOK, map[string]string{"cleaned_body":cleanedBody})
-}
-
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	type errorRes struct {
 		Error string `json:"error"`
@@ -177,6 +173,7 @@ func cleanBody(body string) string {
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	type userParams struct {
 		Email string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type userResponse struct {
@@ -194,10 +191,17 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hashedPass, err := auth.HashPassword(params.Password)
+	if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Could not hash password")
+        return
+    }
+
 	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Email: params.Email,
+		HashedPassword: hashedPass,
 	})
 
 	if err != nil {
@@ -211,4 +215,129 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
 	})
+}
+
+func (cfg *apiConfig) chirpHandler(w http.ResponseWriter, r *http.Request) {
+	type jsonPayload struct {
+		Body string `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+
+	var params jsonPayload
+	err := json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	cleanedBody := cleanBody(params.Body)
+
+	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Body: cleanedBody,
+		UserID: params.UserID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, chirpResp{
+		ID: chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		UserID: chirp.UserID,
+	})
+}
+
+func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+
+	dbChirps, err := cfg.db.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	chirps := []chirpResp{}
+
+	for _, dbChirps := range dbChirps {
+		chirps = append(chirps, chirpResp{
+			ID: dbChirps.ID,
+			CreatedAt: dbChirps.CreatedAt,
+			UpdatedAt: dbChirps.UpdatedAt,
+			Body: dbChirps.Body,
+			UserID: dbChirps.UserID,
+		})
+	}
+
+	respondWithJSON(w, http.StatusOK, chirps)
+}
+
+func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
+	chirpIDstr := r.PathValue("chirpid")
+	parsedID, err := uuid.Parse(chirpIDstr)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Incorrect id passed")
+	}
+
+	chirp, err := cfg.db.GetChirpByID(r.Context(), parsedID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, chirpResp{
+		ID: chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body: chirp.Body,
+			UserID: chirp.UserID,
+	})
+}
+
+func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
+	type userParams struct {
+		Email string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	var params userParams
+
+	err := json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	user, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Internal server error")
+        return
+    }
+
+	if !match {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, userResponse{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	})
+
 }
