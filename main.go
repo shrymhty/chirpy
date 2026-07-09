@@ -77,6 +77,7 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", apiCgf.handleRefreshTokens)
 	mux.HandleFunc("POST /api/revoke", apiCgf.revokeTokens)
 	mux.HandleFunc("PUT /api/users", apiCgf.updateUser)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCgf.deleteChirp)
 
 	mux.HandleFunc("GET /admin/metrics", apiCgf.handleMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCgf.resetMetrics)
@@ -307,10 +308,10 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 
 	respondWithJSON(w, http.StatusOK, chirpResp{
 		ID: chirp.ID,
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body: chirp.Body,
-			UserID: chirp.UserID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		UserID: chirp.UserID,
 	})
 }
 
@@ -495,4 +496,44 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 		Email: user.Email,
 	})
 
+}
+
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Missing authorization header")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid token")
+        return
+	}
+
+	chirpIDStr := r.PathValue("chirpID")
+    chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid chirp id")
+		return
+	}
+
+	chirp, err := cfg.db.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Chirp not found")
+		return
+	}
+
+	if userID != chirp.UserID {
+		respondWithError(w, http.StatusForbidden, "Chirp not created by this user")
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusNoContent, "Chirp deleted")
 }
