@@ -76,6 +76,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpid}", apiCgf.getChirpById)
 	mux.HandleFunc("POST /api/refresh", apiCgf.handleRefreshTokens)
 	mux.HandleFunc("POST /api/revoke", apiCgf.revokeTokens)
+	mux.HandleFunc("PUT /api/users", apiCgf.updateUser)
 
 	mux.HandleFunc("GET /admin/metrics", apiCgf.handleMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCgf.resetMetrics)
@@ -444,4 +445,54 @@ func (cfg *apiConfig) revokeTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	type requestParams struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Missing authorization header")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid Token")
+		return
+	}
+
+	var params requestParams
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	hashedPass, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash password")
+		return
+	}
+
+	user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email: params.Email,
+		HashedPassword: hashedPass,
+		UpdatedAt: time.Now().UTC(),
+		ID: userID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, userResponse{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	})
+
 }
