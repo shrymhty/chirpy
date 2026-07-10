@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -279,12 +280,43 @@ func (cfg *apiConfig) chirpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+	authorID := r.URL.Query().Get("author_id")
+	sortOrder := strings.ToLower(r.URL.Query().Get("sort"))
 
-	dbChirps, err := cfg.db.GetChirps(r.Context())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, err.Error())
-		return
+	var (
+		dbChirps []database.Chirp
+		err error
+	)
+
+	if authorID != "" {
+		id, err := uuid.Parse(authorID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid author id")
+			return
+		}
+		dbChirps, err = cfg.db.GetChirpsByUserID(r.Context(), id)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		dbChirps, err = cfg.db.GetChirps(r.Context())
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
+
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+
+	sort.Slice(dbChirps, func(i, j int) bool {
+		if sortOrder == "desc" {
+			return dbChirps[i].CreatedAt.After(dbChirps[j].CreatedAt)
+		}
+		return dbChirps[i].CreatedAt.Before(dbChirps[j].CreatedAt)
+	})
 
 	chirps := []chirpResp{}
 
